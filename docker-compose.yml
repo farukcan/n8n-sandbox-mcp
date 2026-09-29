@@ -1,0 +1,28 @@
+# Dokploy > Create Service > Compose  (Provider: your Git repo, Compose Path: ./docker-compose.yml)
+# Set the variables below in Dokploy's "Environment" tab. Only MCP_TOKEN is required.
+services:
+  sandbox-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:?Set MCP_TOKEN in the Environment tab (openssl rand -hex 32)}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-bridge}        # "none" = no internet inside sandboxes
+      SANDBOX_DNS: ${SANDBOX_DNS:-1.1.1.1,9.9.9.9}
+      MAX_SANDBOXES: ${MAX_SANDBOXES:-5}                 # max parallel sessions
+      SANDBOX_MEMORY: ${SANDBOX_MEMORY:-1g}              # RAM per sandbox
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}                 # CPU per sandbox
+      IDLE_TIMEOUT_MINUTES: ${IDLE_TIMEOUT_MINUTES:-30}  # delete idle sandboxes after
+      MAX_LIFETIME_MINUTES: ${MAX_LIFETIME_MINUTES:-360}
+      DEFAULT_TIMEOUT_SECONDS: ${DEFAULT_TIMEOUT_SECONDS:-55}   # keep below n8n's MCP tool timeout
+      MAX_TIMEOUT_SECONDS: ${MAX_TIMEOUT_SECONDS:-900}
+    volumes:
+      # Needed to start/stop sandbox containers. This makes the service root-equivalent
+      # on the host: never publish its port or attach a domain to it.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - dokploy-network
+    # No "ports:" on purpose. n8n reaches it at http://sandbox-mcp:8000/mcp
+
+networks:
+  dokploy-network:
+    external: true
