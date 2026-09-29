@@ -1,85 +1,87 @@
-# n8n AI Agent için gVisor Sandbox (Dokploy)
+# gVisor Sandbox for the n8n AI Agent (Dokploy)
 
-n8n'deki AI Agent'a güvenli bir terminal verir. Her sohbet kendi izole konteynerini alır;
-konteynerler **gVisor (runsc)** ile çalışır, n8n'in ağına ve sırlarına erişemez, boşta kalınca silinir.
+[Türkçe](BENIOKU.md)
+
+Gives the AI Agent in n8n a safe terminal. Every chat gets its own isolated container;
+containers run under **gVisor (runsc)**, cannot reach n8n's network or secrets, and are deleted when idle.
 
 ```
-n8n AI Agent ── MCP Client Tool ──▶ sandbox-mcp (bu repo) ──▶ sbx-<oturum> konteynerleri (gVisor)
-                (HTTP Streamable,          token korumalı,           internet: açık
-                 Bearer token)             portu dışarı açık değil    host / iç ağ / diğer konteynerler: kapalı
+n8n AI Agent ── MCP Client Tool ──▶ sandbox-mcp (this repo) ──▶ sbx-<session> containers (gVisor)
+                (HTTP Streamable,          token protected,          internet: open
+                 Bearer token)             port not exposed          host / internal net / other containers: blocked
 ```
 
-Ajanın araçları: `run_command`, `run_python`, `write_file`, `read_file`, `reset_sandbox`.
+Agent tools: `run_command`, `run_python`, `write_file`, `read_file`, `reset_sandbox`.
 
-## Dosyalar
+## Files
 
-| Dosya | Ne işe yarar |
+| File | Purpose |
 |---|---|
-| `host/setup-host.sh` | VPS'e **bir kez** SSH ile çalıştırılır: gVisor kurar, Docker'a tanıtır, güvenlik duvarını kurar |
-| `docker-compose.yml` | Dokploy'da deploy edilen servis |
-| `server.py` | MCP sunucusu (oturum başına sandbox açar/kapatır) |
-| `sandbox-image/Dockerfile` | Ajanın çalıştığı ortam (Python 3.12 + hazır paketler). Değiştirirsen sunucu imajı kendisi yeniden derler |
+| `host/setup-host.sh` | Run **once** on the VPS over SSH: installs gVisor, registers it with Docker, sets up the firewall |
+| `docker-compose.yml` | The service deployed in Dokploy |
+| `server.py` | MCP server (creates/removes a sandbox per session) |
+| `sandbox-image/Dockerfile` | The agent's environment (Python 3.12 + preinstalled packages). If you change it, the server rebuilds the image by itself |
 
 ---
 
-## Adım 1 — VPS'e gVisor kur (SSH, tek sefer)
+## Step 1 — Install gVisor on the VPS (SSH, one time)
 
-`host/setup-host.sh` dosyasını sunucuya kopyala (scp ile ya da `nano setup-host.sh` açıp içeriği yapıştır) ve çalıştır:
+Copy `host/setup-host.sh` to the server (with scp, or open `nano setup-host.sh` and paste the content) and run it:
 
 ```bash
 sudo bash setup-host.sh
 ```
 
-Script sonunda şunları görmelisin:
+At the end of the script you should see:
 
 - `✓ Docker sees the runsc runtime`
 - `✓ gVisor works`
 - `✓ internet access works`
 - `✓ the host (SSH ...) is NOT reachable from sandboxes`
 
-Notlar:
-- Çalışan konteynerlerin (n8n, Dokploy) yeniden başlatılmaz; Docker sadece `reload` edilir.
-- VPS'lerde KVM olmadığı için gVisor `systrap` modunda çalışır, bu normaldir.
-- Güvenlik duvarı kuralları Docker'ın varsayılan `docker0` ağına uygulanır ve reboot sonrası otomatik gelir
-  (`n8n-sandbox-firewall.service`). O ağda başka konteynerin yoksa hiçbir şeyi etkilemez.
+Notes:
+- Running containers (n8n, Dokploy) are not restarted; Docker is only `reload`ed.
+- VPSes have no KVM, so gVisor runs in `systrap` mode; this is normal.
+- The firewall rules apply to Docker's default `docker0` network and come back automatically after a reboot
+  (`n8n-sandbox-firewall.service`). If you have no other containers on that network, nothing else is affected.
 
-## Adım 2 — Repoyu GitHub'a koy
+## Step 2 — Put the repo on GitHub
 
-Bu klasörü **private** bir GitHub reposuna push'la (Dokploy build için kaynağa ihtiyaç duyuyor).
+Push this folder to a **private** GitHub repo (Dokploy needs the source to build).
 
-## Adım 3 — Dokploy'da deploy et
+## Step 3 — Deploy in Dokploy
 
-1. Token üret (bilgisayarında ya da sunucuda): `openssl rand -hex 32`
-2. Dokploy → projen → **Create Service → Compose**
-3. **Compose Type: Docker Compose** (Stack değil — Stack modu `build` desteklemez)
-4. Provider: GitHub → repo ve branch'i seç, **Compose Path:** `./docker-compose.yml`
-5. **Environment** sekmesi:
+1. Generate a token (on your computer or on the server): `openssl rand -hex 32`
+2. Dokploy → your project → **Create Service → Compose**
+3. **Compose Type: Docker Compose** (not Stack — Stack mode does not support `build`)
+4. Provider: GitHub → pick the repo and branch, **Compose Path:** `./docker-compose.yml`
+5. **Environment** tab:
    ```
-   MCP_TOKEN=<1. adımdaki token>
+   MCP_TOKEN=<token from step 1>
    ```
-   (Diğer ayarlar opsiyonel, tablo aşağıda.)
-6. **Domain ekleme.** Bu servis sadece iç ağdan erişilmeli.
-7. **Deploy**. İlk deploy'da sandbox imajı derlenir (birkaç dakika). Logs'ta şunları bekle:
+   (Other settings are optional, see the table below.)
+6. **Do not add a domain.** This service must only be reachable from the internal network.
+7. **Deploy**. The first deploy builds the sandbox image (a few minutes). Expect this in the Logs:
    ```
    Sandbox image n8n-sandbox:latest ready
    MCP endpoint listening on http://0.0.0.0:8000/mcp
    ```
 
-## Adım 4 — n8n servise ulaşabiliyor mu?
+## Step 4 — Can n8n reach the service?
 
-SSH'ta:
+Over SSH:
 
 ```bash
-# İkisi de listede olmalı
+# Both should be in the list
 docker network inspect dokploy-network --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' | grep -iE "n8n|sandbox"
 
-# n8n konteynerinin içinden sağlık kontrolü -> "ok" yazmalı
+# Health check from inside the n8n container -> should print "ok"
 N8N=$(docker ps --format '{{.Names}}' | grep -i n8n | grep -viE "worker|runner|postgres|redis" | head -1)
 docker exec "$N8N" node -e "fetch('http://sandbox-mcp:8000/health').then(r=>r.text()).then(console.log)"
 ```
 
-n8n `dokploy-network`'te değilse (ör. n8n'e domain eklemediysen ya da Isolated Deployments açıksa),
-n8n'in compose dosyasında n8n servisine şunu ekleyip yeniden deploy et:
+If n8n is not on `dokploy-network` (e.g. you did not add a domain to n8n, or Isolated Deployments is on),
+add this to the n8n service in n8n's compose file and redeploy:
 
 ```yaml
 services:
@@ -92,77 +94,77 @@ networks:
     external: true
 ```
 
-## Adım 5 — n8n'de bağla
+## Step 5 — Connect it in n8n
 
-1. **Credentials → New → Bearer Auth**: Token = `MCP_TOKEN` değerin.
-2. AI Agent node'unda **Tool → MCP Client Tool** ekle:
+1. **Credentials → New → Bearer Auth**: Token = your `MCP_TOKEN` value.
+2. In the AI Agent node, add **Tool → MCP Client Tool**:
    - **Endpoint:** `http://sandbox-mcp:8000/mcp`
    - **Server Transport:** HTTP Streamable
-   - **Authentication:** Bearer Auth → az önceki credential
+   - **Authentication:** Bearer Auth → the credential from above
    - **Tools to Include:** All
-   - Options'ta **Timeout** varsa `600000` (10 dk) yap. Yapmazsan uzun komutlar n8n tarafında zaman aşımına düşer;
-     bu yüzden varsayılan komut süresi 55 sn tutuldu.
-3. AI Agent'ın **System Message**'ına şunu ekle (Chat Trigger kullanıyorsan):
+   - If Options has a **Timeout**, set it to `600000` (10 min). Otherwise long commands time out on the n8n side;
+     that is why the default command timeout is kept at 55 s.
+3. Add this to the AI Agent's **System Message** (if you use the Chat Trigger):
 
    ```
-   Bir Linux sandbox'ına erişimin var (run_command, run_python, write_file, read_file, reset_sandbox).
-   Tüm sandbox araçlarında session_id olarak HER ZAMAN şunu kullan: {{ $('When chat message received').item.json.sessionId }}
-   Karmaşık işleri adım adım yap: önce kodu dosyaya yaz, sonra çalıştır, hatayı okuyup düzelt.
-   Sonuç dosyalarını read_file ile oku ve kullanıcıya özetle.
+   You have access to a Linux sandbox (run_command, run_python, write_file, read_file, reset_sandbox).
+   ALWAYS use this as session_id in every sandbox tool: {{ $('When chat message received').item.json.sessionId }}
+   Do complex work step by step: first write the code to a file, then run it, read the error and fix it.
+   Read result files with read_file and summarize them for the user.
    ```
 
-   Telegram gibi başka bir trigger kullanıyorsan session_id olarak sohbet kimliğini ver, ör.
+   If you use another trigger such as Telegram, pass the chat ID as session_id, e.g.
    `{{ $('Telegram Trigger').item.json.message.chat.id }}`.
 
-## Adım 6 — Test
+## Step 6 — Test
 
-Chat'e sırayla yaz:
+Send these to the chat in order:
 
-1. `Sandbox'ta dmesg komutunun ilk satırını ve python sürümünü göster.` → çıktıda **Starting gVisor** görmelisin.
-2. `pandas ile 1'den 10'a kadar sayıların karelerini içeren bir tablo oluştur, result.csv olarak kaydet ve içeriğini göster.`
-3. `172.17.0.1 adresinin 22 portuna bağlanmayı dene.` → bağlanamamalı (güvenlik duvarı çalışıyor demek).
+1. `Show the first line of the dmesg command and the python version in the sandbox.` → the output should contain **Starting gVisor**.
+2. `Use pandas to create a table with the squares of the numbers from 1 to 10, save it as result.csv and show its content.`
+3. `Try to connect to port 22 of 172.17.0.1.` → it should fail (this means the firewall works).
 
-Dokploy'da sandbox-mcp loglarında her komut `session=... run_command: ...` olarak görünür.
+In Dokploy, every command appears in the sandbox-mcp logs as `session=... run_command: ...`.
 
 ---
 
-## Ayarlar (Dokploy Environment)
+## Settings (Dokploy Environment)
 
-| Değişken | Varsayılan | Açıklama |
+| Variable | Default | Description |
 |---|---|---|
-| `MCP_TOKEN` | — (zorunlu) | En az 24 karakter. `openssl rand -hex 32` |
-| `SANDBOX_NETWORK` | `bridge` | `none` = sandbox'ta hiç internet yok (pip install çalışmaz, en güvenlisi) |
-| `SANDBOX_DNS` | `1.1.1.1,9.9.9.9` | Sandbox'ların kullandığı DNS sunucuları |
-| `MAX_SANDBOXES` | `5` | Aynı anda en fazla kaç oturum |
-| `SANDBOX_MEMORY` | `1g` | Sandbox başına RAM |
-| `SANDBOX_CPUS` | `1.0` | Sandbox başına CPU |
-| `IDLE_TIMEOUT_MINUTES` | `30` | Boşta kalan sandbox bu süre sonra silinir |
-| `MAX_LIFETIME_MINUTES` | `360` | Bir sandbox en fazla bu kadar yaşar |
-| `DEFAULT_TIMEOUT_SECONDS` | `55` | Komut başına varsayılan süre (n8n timeout'unu artırdıysan yükseltebilirsin) |
-| `MAX_TIMEOUT_SECONDS` | `900` | Ajanın isteyebileceği en uzun süre |
+| `MCP_TOKEN` | — (required) | At least 24 characters. `openssl rand -hex 32` |
+| `SANDBOX_NETWORK` | `bridge` | `none` = no internet at all in the sandbox (pip install will not work, the safest option) |
+| `SANDBOX_DNS` | `1.1.1.1,9.9.9.9` | DNS servers used by the sandboxes |
+| `MAX_SANDBOXES` | `5` | Maximum number of concurrent sessions |
+| `SANDBOX_MEMORY` | `1g` | RAM per sandbox |
+| `SANDBOX_CPUS` | `1.0` | CPU per sandbox |
+| `IDLE_TIMEOUT_MINUTES` | `30` | An idle sandbox is deleted after this long |
+| `MAX_LIFETIME_MINUTES` | `360` | Maximum lifetime of a sandbox |
+| `DEFAULT_TIMEOUT_SECONDS` | `55` | Default time per command (raise it if you increased the n8n timeout) |
+| `MAX_TIMEOUT_SECONDS` | `900` | Longest timeout the agent can request |
 
-Ek paket/araç lazımsa `sandbox-image/Dockerfile`'a ekle, push'la, redeploy et; imaj otomatik yeniden derlenir.
+If you need extra packages/tools, add them to `sandbox-image/Dockerfile`, push and redeploy; the image is rebuilt automatically.
 
-## Güvenlik notları
+## Security notes
 
-- `sandbox-mcp` Docker soketine eriştiği için **host'ta root yetkisine eşdeğer**. Ona asla domain ya da port verme,
-  token'ı kimseyle paylaşma.
-- Sandbox'lara hiçbir API anahtarı / env değişkeni geçirilmez. Ajanın sandbox'a koyduğu veri internete gidebilir
-  (internet açık olduğu için); hassas veriyle çalışıyorsan `SANDBOX_NETWORK=none` kullan.
-- Sandbox'lar: gVisor + root olmayan kullanıcı + tüm Linux capability'leri kapalı + `no-new-privileges`
-  + RAM/CPU/process limiti + host, iç ağlar, bulut metadata adresi ve SMTP 25 engelli.
-- gVisor'ı güncel tut: `sudo apt-get update && sudo apt-get install --only-upgrade runsc`
+- `sandbox-mcp` has access to the Docker socket, so it is **equivalent to root on the host**. Never give it a domain or a port,
+  and never share the token.
+- No API keys / env variables are passed to the sandboxes. Data the agent puts into the sandbox can leave to the internet
+  (since internet is open); if you work with sensitive data, use `SANDBOX_NETWORK=none`.
+- Sandboxes: gVisor + non-root user + all Linux capabilities dropped + `no-new-privileges`
+  + RAM/CPU/process limits + host, internal networks, the cloud metadata address and SMTP 25 blocked.
+- Keep gVisor up to date: `sudo apt-get update && sudo apt-get install --only-upgrade runsc`
 
-## Sorun giderme
+## Troubleshooting
 
-| Belirti | Çözüm |
+| Symptom | Fix |
 |---|---|
-| Logs: `Docker runtime 'runsc' is not installed` | Adım 1'i çalıştır, sonra redeploy |
-| Logs: `MCP_TOKEN must be set...` | Environment'a en az 24 karakterlik token ekle |
-| Deploy: `network dokploy-network not found` | `docker network ls` ile kontrol et; Compose Type'ın "Docker Compose" olduğundan emin ol |
-| n8n: bağlanamıyor / `ENOTFOUND sandbox-mcp` | Adım 4 — ikisi aynı ağda değil |
-| n8n: 401 | Bearer token yanlış |
-| n8n: zaman aşımı | MCP Client Tool Timeout'u artır ya da `DEFAULT_TIMEOUT_SECONDS`'u düşür |
-| Sandbox'ta `pip install` / DNS çalışmıyor | `docker run --rm --runtime=runsc --dns 1.1.1.1 busybox nslookup pypi.org` ile test et; sağlayıcın dış DNS'i engelliyorsa `SANDBOX_DNS` ile başka DNS ver |
-| `Sandbox limit reached` | `MAX_SANDBOXES`'ı artır veya `IDLE_TIMEOUT_MINUTES`'ı düşür |
-| Dokploy temizliği sandbox imajını sildi | Sorun değil: ilk komutta imaj otomatik yeniden derlenir; o ilk çağrı zaman aşımına düşebilir, birkaç dakika sonra tekrar dene |
+| Logs: `Docker runtime 'runsc' is not installed` | Run Step 1, then redeploy |
+| Logs: `MCP_TOKEN must be set...` | Add a token of at least 24 characters to Environment |
+| Deploy: `network dokploy-network not found` | Check with `docker network ls`; make sure the Compose Type is "Docker Compose" |
+| n8n: cannot connect / `ENOTFOUND sandbox-mcp` | Step 4 — they are not on the same network |
+| n8n: 401 | Wrong Bearer token |
+| n8n: timeout | Increase the MCP Client Tool Timeout or lower `DEFAULT_TIMEOUT_SECONDS` |
+| `pip install` / DNS does not work in the sandbox | Test with `docker run --rm --runtime=runsc --dns 1.1.1.1 busybox nslookup pypi.org`; if your provider blocks external DNS, set another DNS with `SANDBOX_DNS` |
+| `Sandbox limit reached` | Increase `MAX_SANDBOXES` or lower `IDLE_TIMEOUT_MINUTES` |
+| Dokploy cleanup deleted the sandbox image | Not a problem: the image is rebuilt automatically on the first command; that first call may time out, try again after a few minutes |
